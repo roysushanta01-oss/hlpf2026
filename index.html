@@ -809,15 +809,14 @@ function generatePDF(payload) {
 /* ════════════════════════════════════════════════════
    LOAD RESPONSES
    ════════════════════════════════════════════════════ */
-async function loadResponses(goal) {
+function loadResponses(goal) {
   const container = document.getElementById('resp_' + goal);
   const noteEl = document.getElementById('setup_note_' + goal);
 
   if (SCRIPT_URL === 'YOUR_APPS_SCRIPT_URL_HERE') {
     container.innerHTML = `<div class="no-data">
       <p style="font-size:22px;margin-bottom:8px;">⚙️</p>
-      <p>Configure the Apps Script URL to see live responses here.<br>
-      Open this HTML file in a text editor, find <code style="background:var(--n100);padding:2px 5px;border-radius:3px;">YOUR_APPS_SCRIPT_URL_HERE</code> and replace it with your deployed Web App URL.</p>
+      <p>Configure the Apps Script URL to see live responses here.</p>
     </div>`;
     return;
   }
@@ -825,17 +824,38 @@ async function loadResponses(goal) {
   if (noteEl) noteEl.style.display = 'none';
   container.innerHTML = '<div class="no-data">Loading…</div>';
 
-  try {
-    const res = await fetch(SCRIPT_URL + '?goal=' + goal + '&t=' + Date.now());
-    const data = await res.json();
+  // Use JSONP to bypass CORS — Apps Script supports callback parameter
+  const callbackName = 'jsonpCallback_' + goal + '_' + Date.now();
+  const script = document.createElement('script');
+  script.src = SCRIPT_URL + '?goal=' + goal + '&callback=' + callbackName + '&t=' + Date.now();
+
+  // Define the callback
+  window[callbackName] = function(data) {
+    // Clean up
+    delete window[callbackName];
+    document.head.removeChild(script);
+
     if (!data.responses || data.responses.length === 0) {
       container.innerHTML = '<div class="no-data">No responses submitted yet for Goal ' + goal + '.</div>';
       return;
     }
     renderResponses(goal, data.responses);
-  } catch(e) {
-    container.innerHTML = '<div class="no-data">Error loading responses. Check the Apps Script URL.<br><small>' + e + '</small></div>';
-  }
+  };
+
+  // Timeout fallback
+  script.onerror = function() {
+    delete window[callbackName];
+    container.innerHTML = '<div class="no-data">Error loading responses. Please try refreshing.</div>';
+  };
+
+  setTimeout(function() {
+    if (window[callbackName]) {
+      delete window[callbackName];
+      container.innerHTML = '<div class="no-data">Timed out loading responses. Click Refresh to try again.</div>';
+    }
+  }, 10000);
+
+  document.head.appendChild(script);
 }
 
 function renderResponses(goal, responses) {
@@ -1001,25 +1021,40 @@ function doGet(e) {
 
     // READ — return stored responses for a goal
     const goal = e.parameter.goal || '6';
+    const callback = e.parameter.callback || '';
     const ss = SpreadsheetApp.openById(SHEET_ID);
     const sheet = ss.getSheetByName('Goal_' + goal);
+    let result;
     if (!sheet || sheet.getLastRow() < 2) {
-      return ContentService
-        .createTextOutput(JSON.stringify({responses:[]}))
-        .setMimeType(ContentService.MimeType.JSON);
+      result = JSON.stringify({responses:[]});
+    } else {
+      const rows = sheet.getDataRange().getValues();
+      const responses = [];
+      for (let i = 1; i < rows.length; i++) {
+        try { responses.push(JSON.parse(rows[i][4])); } catch(e2) {}
+      }
+      result = JSON.stringify({responses});
     }
-    const rows = sheet.getDataRange().getValues();
-    const responses = [];
-    for (let i = 1; i < rows.length; i++) {
-      try { responses.push(JSON.parse(rows[i][4])); } catch(e2) {}
+    // Support JSONP for cross-origin browser requests
+    if (callback) {
+      return ContentService
+        .createTextOutput(callback + '(' + result + ')')
+        .setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     return ContentService
-      .createTextOutput(JSON.stringify({responses}))
+      .createTextOutput(result)
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch(err) {
+    const errResult = JSON.stringify({status:'error', msg: err.toString()});
+    const callback = (e.parameter && e.parameter.callback) || '';
+    if (callback) {
+      return ContentService
+        .createTextOutput(callback + '(' + errResult + ')')
+        .setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     return ContentService
-      .createTextOutput(JSON.stringify({status:'error', msg: err.toString()}))
+      .createTextOutput(errResult)
       .setMimeType(ContentService.MimeType.JSON);
   }
 }
