@@ -682,11 +682,51 @@ async function submitForm(goal) {
    Apps Script handles GET from any domain without CORS
    ════════════════════════════════════════════════════ */
 async function submitViaGet(payload) {
-  const encoded = encodeURIComponent(JSON.stringify(payload));
-  const url = SCRIPT_URL + '?action=submit&data=' + encoded;
-  const res = await fetch(url, { method: 'GET' });
-  const text = await res.text();
-  return text.includes('ok');
+  return new Promise((resolve) => {
+    const iframeName = 'sf_' + Date.now();
+    const iframe = document.createElement('iframe');
+    iframe.name = iframeName;
+    iframe.style.cssText = 'display:none;width:0;height:0;border:0;';
+    document.body.appendChild(iframe);
+
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = SCRIPT_URL;
+    form.target = iframeName;
+    form.style.display = 'none';
+    form.enctype = 'application/x-www-form-urlencoded';
+
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'data';
+    input.value = JSON.stringify(payload);
+    form.appendChild(input);
+
+    document.body.appendChild(form);
+
+    let resolved = false;
+    function cleanup() {
+      try { document.body.removeChild(form); } catch(e) {}
+      try { document.body.removeChild(iframe); } catch(e) {}
+    }
+
+    iframe.onload = function() {
+      if (resolved) return;
+      resolved = true;
+      setTimeout(cleanup, 500);
+      resolve(true);
+    };
+
+    // Timeout after 12 seconds
+    setTimeout(function() {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      resolve(false);
+    }, 12000);
+
+    form.submit();
+  });
 }
 
 /* ════════════════════════════════════════════════════
