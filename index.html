@@ -658,11 +658,11 @@ async function submitForm(goal) {
     }))
   };
 
-  // Send to Google Sheet + Doc via hidden iframe (bypasses CORS)
+  // Send to Google Sheet + Doc via GET request (most reliable cross-origin method)
   let sheetOk = false;
   if (SCRIPT_URL !== 'YOUR_APPS_SCRIPT_URL_HERE') {
     try {
-      sheetOk = await submitViaIframe(payload);
+      sheetOk = await submitViaGet(payload);
     } catch(e) { console.warn('Submission error:', e); }
   }
 
@@ -678,54 +678,15 @@ async function submitForm(goal) {
 }
 
 /* ════════════════════════════════════════════════════
-   IFRAME SUBMISSION — bypasses CORS for Apps Script
+   GET SUBMISSION — most reliable cross-origin method
+   Apps Script handles GET from any domain without CORS
    ════════════════════════════════════════════════════ */
-function submitViaIframe(payload) {
-  return new Promise((resolve) => {
-    // Create hidden iframe
-    const iframe = document.createElement('iframe');
-    iframe.name = 'submit_iframe_' + Date.now();
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-
-    // Create form targeting the iframe
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.action = SCRIPT_URL;
-    form.target = iframe.name;
-    form.style.display = 'none';
-
-    // Add payload as hidden input
-    const input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = 'data';
-    input.value = JSON.stringify(payload);
-    form.appendChild(input);
-
-    document.body.appendChild(form);
-
-    // Listen for iframe load = submission complete
-    let done = false;
-    iframe.onload = () => {
-      if (done) return;
-      done = true;
-      setTimeout(() => {
-        document.body.removeChild(form);
-        document.body.removeChild(iframe);
-      }, 1000);
-      resolve(true);
-    };
-
-    // Timeout fallback after 10 seconds
-    setTimeout(() => {
-      if (done) return;
-      done = true;
-      try { document.body.removeChild(form); document.body.removeChild(iframe); } catch(e) {}
-      resolve(false);
-    }, 10000);
-
-    form.submit();
-  });
+async function submitViaGet(payload) {
+  const encoded = encodeURIComponent(JSON.stringify(payload));
+  const url = SCRIPT_URL + '?action=submit&data=' + encoded;
+  const res = await fetch(url, { method: 'GET' });
+  const text = await res.text();
+  return text.includes('ok');
 }
 
 /* ════════════════════════════════════════════════════
@@ -1026,10 +987,27 @@ function doPost(e) {
 
 function doGet(e) {
   try {
+    const action = e.parameter.action || 'read';
+
+    // SAVE — submission arrives as GET with encoded data parameter
+    if (action === 'submit' && e.parameter.data) {
+      const data = JSON.parse(decodeURIComponent(e.parameter.data));
+      writeToSheet(data);
+      createFormattedDoc(data);
+      return ContentService
+        .createTextOutput(JSON.stringify({status:'ok'}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // READ — return stored responses for a goal
     const goal = e.parameter.goal || '6';
     const ss = SpreadsheetApp.openById(SHEET_ID);
     const sheet = ss.getSheetByName('Goal_' + goal);
-    if (!sheet || sheet.getLastRow() < 2) return ok(JSON.stringify({responses:[]}));
+    if (!sheet || sheet.getLastRow() < 2) {
+      return ContentService
+        .createTextOutput(JSON.stringify({responses:[]}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
     const rows = sheet.getDataRange().getValues();
     const responses = [];
     for (let i = 1; i < rows.length; i++) {
@@ -1038,8 +1016,11 @@ function doGet(e) {
     return ContentService
       .createTextOutput(JSON.stringify({responses}))
       .setMimeType(ContentService.MimeType.JSON);
+
   } catch(err) {
-    return ok(JSON.stringify({responses:[]}));
+    return ContentService
+      .createTextOutput(JSON.stringify({status:'error', msg: err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
   }
 }
 
