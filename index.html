@@ -658,16 +658,11 @@ async function submitForm(goal) {
     }))
   };
 
-  // Send to Google Sheet + Doc
+  // Send to Google Sheet + Doc via hidden iframe (bypasses CORS)
   let sheetOk = false;
   if (SCRIPT_URL !== 'YOUR_APPS_SCRIPT_URL_HERE') {
     try {
-      await fetch(SCRIPT_URL, {
-        method: 'POST', mode: 'no-cors',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(payload)
-      });
-      sheetOk = true;
+      sheetOk = await submitViaIframe(payload);
     } catch(e) { console.warn('Submission error:', e); }
   }
 
@@ -677,9 +672,60 @@ async function submitForm(goal) {
   btn.innerHTML = 'Submit &amp; Download PDF';
 
   const msg = sheetOk
-    ? '✓ Submitted! PDF downloaded. Email the PDF to the Focal Point Coordinator.'
-    : '✓ PDF downloaded. Email it to the Focal Point Coordinator. (Apps Script URL not yet configured)';
-  showToast(msg, true);
+    ? '✓ Submitted successfully! PDF downloaded. Email the PDF to the Focal Point Coordinator.'
+    : '✓ PDF downloaded. Note: online submission may have failed — email the PDF to the Focal Point Coordinator.';
+  showToast(msg, sheetOk);
+}
+
+/* ════════════════════════════════════════════════════
+   IFRAME SUBMISSION — bypasses CORS for Apps Script
+   ════════════════════════════════════════════════════ */
+function submitViaIframe(payload) {
+  return new Promise((resolve) => {
+    // Create hidden iframe
+    const iframe = document.createElement('iframe');
+    iframe.name = 'submit_iframe_' + Date.now();
+    iframe.style.display = 'none';
+    document.body.appendChild(iframe);
+
+    // Create form targeting the iframe
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = SCRIPT_URL;
+    form.target = iframe.name;
+    form.style.display = 'none';
+
+    // Add payload as hidden input
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'data';
+    input.value = JSON.stringify(payload);
+    form.appendChild(input);
+
+    document.body.appendChild(form);
+
+    // Listen for iframe load = submission complete
+    let done = false;
+    iframe.onload = () => {
+      if (done) return;
+      done = true;
+      setTimeout(() => {
+        document.body.removeChild(form);
+        document.body.removeChild(iframe);
+      }, 1000);
+      resolve(true);
+    };
+
+    // Timeout fallback after 10 seconds
+    setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { document.body.removeChild(form); document.body.removeChild(iframe); } catch(e) {}
+      resolve(false);
+    }, 10000);
+
+    form.submit();
+  });
 }
 
 /* ════════════════════════════════════════════════════
@@ -961,12 +1007,20 @@ const QUESTIONS = [
 
 function doPost(e) {
   try {
-    const data = JSON.parse(e.postData.contents);
+    // Handle both iframe form POST (e.parameter.data) and direct JSON POST (e.postData.contents)
+    let data;
+    if (e.parameter && e.parameter.data) {
+      data = JSON.parse(e.parameter.data);
+    } else if (e.postData && e.postData.contents) {
+      data = JSON.parse(e.postData.contents);
+    } else {
+      return ok('Error: No data received');
+    }
     writeToSheet(data);
     createFormattedDoc(data);
-    return ok('Saved');
+    return HtmlService.createHtmlOutput('<p>Saved successfully.</p>');
   } catch(err) {
-    return ok('Error: ' + err.toString());
+    return HtmlService.createHtmlOutput('<p>Error: ' + err.toString() + '</p>');
   }
 }
 
